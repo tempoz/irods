@@ -25,25 +25,45 @@ extern int GlobalAllRuleExecFlag;
  *        otherwise error code
  */
 
-int readRuleSetFromFile( const char *ruleBaseName, RuleSet *ruleSet, Env *funcDesc, int* errloc, rError_t *errmsg, Region *r ) {
-    char rulesFileName[MAX_NAME_LEN];
-    getRuleBasePath( ruleBaseName, rulesFileName );
-
-    return readRuleSetFromLocalFile( ruleBaseName, rulesFileName, ruleSet, funcDesc, errloc, errmsg, r );
+std::map<std::string, boost::iostreams::file_descriptor>
+get_cached_rulebase_map() {
+    static std::map<std::string, boost::iostreams::file_descriptor> rulebase_map;
+    return rulebase_map;
 }
-int readRuleSetFromLocalFile( const char *ruleBaseName, const char *rulesFileName, RuleSet *ruleSet, Env *funcDesc, int *errloc, rError_t *errmsg, Region *r ) {
 
+int readRuleSetFromFilePath( const std::string& ruleBaseName, RuleSet *ruleSet, Env *funcDesc, int* errloc, rError_t *errmsg, Region *r ) {
+    char rulesFileName[MAX_NAME_LEN];
+    getRuleBasePath( ruleBaseName.c_str(), rulesFileName );
     FILE *file;
     char errbuf[ERR_MSG_LEN];
     file = fopen( rulesFileName, "r" );
     if ( file == NULL ) {
         snprintf( errbuf, ERR_MSG_LEN,
-                  "readRuleSetFromFile() could not open rules file %s\n",
+                  "readRuleSetFromFilePath() could not open rules file %s\n",
                   rulesFileName );
         addRErrorMsg( errmsg, RULES_FILE_READ_ERROR, errbuf );
         return RULES_FILE_READ_ERROR;
     }
-    Pointer *e = newPointer( file, ruleBaseName );
+
+    return readRuleSetFromLocalFile( ruleBaseName, file, ruleSet, funcDesc, errloc, errmsg, r );
+}
+int readRuleSetFromFileDescriptor( const std::string& ruleBaseName, const boost::iostreams::file_descriptor& fd, RuleSet *ruleSet, Env *funcDesc, int *errloc, rError_t *errmsg, Region *r ) {
+    FILE *file;
+    char errbuf[ERR_MSG_LEN];
+    file = fdopen( fd.handle(), "r" );
+    if ( file == NULL ) {
+        snprintf( errbuf, ERR_MSG_LEN,
+                  "readRuleSetFromFileDescriptor() could not open rules file %s\n",
+                  ruleBaseName.c_str() );
+        addRErrorMsg( errmsg, RULES_FILE_READ_ERROR, errbuf );
+        return RULES_FILE_READ_ERROR;
+    }
+
+    return readRuleSetFromLocalFile( ruleBaseName, file, ruleSet, funcDesc, errloc, errmsg, r );
+}
+int readRuleSetFromLocalFile( const std::string& ruleBaseName, FILE* file, RuleSet *ruleSet, Env *funcDesc, int *errloc, rError_t *errmsg, Region *r ) {
+
+    Pointer *e = newPointer( file, ruleBaseName.c_str() );
     int ret = parseRuleSet( e, ruleSet, funcDesc, errloc, errmsg, r );
     deletePointer( e );
     if ( ret < 0 ) {

@@ -76,6 +76,7 @@ foreach(PLUGIN ${IRODS_RULE_ENGINE_PLUGINS})
     ${IRODS_EXTERNALS_FULLPATH_BOOST}/lib/libboost_filesystem.so
     ${IRODS_EXTERNALS_FULLPATH_BOOST}/lib/libboost_system.so
     ${IRODS_EXTERNALS_FULLPATH_BOOST}/lib/libboost_regex.so
+    ${IRODS_EXTERNALS_FULLPATH_BOOST}/lib/libboost_iostreams.so
     dl
     )
 

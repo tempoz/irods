@@ -25,6 +25,9 @@
 #include "irods_get_full_path_for_config_file.hpp"
 #include "irods_log.hpp"
 #include <boost/filesystem.hpp>
+#include <boost/iostreams/device/file_descriptor.hpp>
+#include <boost/iostreams/stream_buffer.hpp>
+#include <boost/iostreams/stream.hpp>
 
 #ifdef DEBUG
 #include "re.hpp"
@@ -341,10 +344,6 @@ std::string get_rule_base_path( const std::string &irb) {
     return std::string(fn);
 }
 
-std::string get_rule_base_path_copy( const std::string &irb, const int pid) {
-    return get_rule_base_path(irb) + "." + std::to_string(pid);
-}
-
 std::vector<std::string> parse_irbSet(const std::string &irbSet) {
     std::vector<std::string> irbs;
     char r1[NAME_LEN], r2[RULE_SET_DEF_LENGTH], r3[RULE_SET_DEF_LENGTH];
@@ -360,7 +359,7 @@ std::vector<std::string> parse_irbSet(const std::string &irbSet) {
 
 #define HASH_BUF_SZ (1024*1024)
 
-int hash_rules(const std::vector<std::string> &irbs, const int pid, std::string &digest) {
+int hash_rules(const std::map<std::string, boost::iostreams::file_descriptor>& irbs, std::string &digest) {
     int status;
     irods::Hasher hasher;
     irods::error ret = irods::getHasher(
@@ -377,11 +376,9 @@ int hash_rules(const std::vector<std::string> &irbs, const int pid, std::string 
 
     }
 
-    for (auto const &irb : irbs) {
-        auto fn = get_rule_base_path_copy( irb, pid );
-        std::ifstream in_file(
-            fn,
-            std::ios::in | std::ios::binary );
+    for (auto&& [fn, desc] : irbs) {
+        boost::iostreams::stream<boost::iostreams::file_descriptor> in_file{
+            desc};
         if ( !in_file.is_open() ) {
             status = UNIX_FILE_OPEN_ERR - errno;
             rodsLogError(
@@ -422,56 +419,52 @@ int hash_rules(const std::vector<std::string> &irbs, const int pid, std::string 
     return 0;
 }
 
-class make_copy {
-public:
-        make_copy(const std::vector<std::string> _irbs, const int _pid) : irbs_(_irbs), pid_(_pid) {
-            for(auto const &irb : _irbs) {
-                boost::filesystem::copy_file(get_rule_base_path(irb), get_rule_base_path_copy(irb, _pid));
-            }
+std::map<std::string, boost::iostreams::file_descriptor> make_tmp_cache_files(const std::vector<std::string>& _irbs) {
+    std::map<std::string, boost::iostreams::file_descriptor> descriptors{};
+    for (const auto& irb: _irbs) {
+        const auto fd = fileno(std::tmpfile());
+        descriptors.emplace(std::piecewise_construct,
+                std::forward_as_tuple(irb),
+                std::forward_as_tuple(fd, boost::iostreams::file_descriptor_flags::close_handle));
+
+        boost::iostreams::stream<boost::iostreams::file_descriptor>{descriptors[irb]} << std::ifstream{get_rule_base_path(irb), std::ios::binary}.rdbuf();
+    }
+    return descriptors;
+}
+
+int load_rules(const char* irbSet, const std::vector<std::string> &irbs, const time_type timestamp) {
+    generateRegions();
+    generateRuleSets();
+    generateFunctionDescriptionTables();
+    if ( ruleEngineConfig.ruleEngineStatus == UNINITIALIZED ) {
+        getSystemFunctions( ruleEngineConfig.sysFuncDescIndex->current, ruleEngineConfig.sysRegion );
+    }
+
+    auto cached_rulebases = make_tmp_cache_files(irbs);
+    for(auto&& [irb, desc] : cached_rulebases) {
+        int i = readRuleStructAndRuleSetFromFile(irb.c_str(), desc);
+
+        if ( i != 0 ) {
+            ruleEngineConfig.ruleEngineStatus = INITIALIZED;
+            return i;
         }
-        ~make_copy() {
-            for(auto const &irb : irbs_) {
-                boost::filesystem::remove(get_rule_base_path_copy(irb, pid_));
-            }
-        }
-private:
-        const std::vector<std::string> irbs_;
-        const int pid_;
-};
+    }
 
-int load_rules(const char* irbSet, const std::vector<std::string> &irbs, const int pid, const time_type timestamp) {
-                generateRegions();
-                generateRuleSets();
-                generateFunctionDescriptionTables();
-                if ( ruleEngineConfig.ruleEngineStatus == UNINITIALIZED ) {
-                    getSystemFunctions( ruleEngineConfig.sysFuncDescIndex->current, ruleEngineConfig.sysRegion );
-                }
+    createCoreRuleIndex( );
 
-                make_copy copy_rule_base_files(irbs, pid);
-                for(auto const & irb: irbs) {
-                    int i = readRuleStructAndRuleSetFromFile( irb.c_str(), get_rule_base_path_copy(irb, pid).c_str() );
-
-                    if ( i != 0 ) {
-                        ruleEngineConfig.ruleEngineStatus = INITIALIZED;
-                        return i;
-                    }
-                }
-
-                createCoreRuleIndex( );
-
-                /* set max timestamp */
-                time_type_set( ruleEngineConfig.timestamp, timestamp );
-                std::string hash;
-                int ret = hash_rules(irbs, pid, hash);
-                if (ret >= 0) {
-                    rstrcpy(ruleEngineConfig.hash, hash.c_str(), CHKSUM_LEN);
-                } else {
-                    ruleEngineConfig.ruleEngineStatus = INITIALIZED;
-                    return ret;
-                }
-                snprintf( ruleEngineConfig.ruleBase, sizeof( ruleEngineConfig.ruleBase ), "%s", irbSet );
-                ruleEngineConfig.ruleEngineStatus = INITIALIZED;
-                return 0;
+    /* set max timestamp */
+    time_type_set( ruleEngineConfig.timestamp, timestamp );
+    std::string hash;
+    int ret = hash_rules(cached_rulebases, hash);
+    if (ret >= 0) {
+        rstrcpy(ruleEngineConfig.hash, hash.c_str(), CHKSUM_LEN);
+    } else {
+        ruleEngineConfig.ruleEngineStatus = INITIALIZED;
+        return ret;
+    }
+    snprintf( ruleEngineConfig.ruleBase, sizeof( ruleEngineConfig.ruleBase ), "%s", irbSet );
+    ruleEngineConfig.ruleEngineStatus = INITIALIZED;
+    return 0;
 }
 
 int loadRuleFromCacheOrFile( const char* inst_name, const char *irbSet ) {
@@ -494,8 +487,6 @@ int loadRuleFromCacheOrFile( const char* inst_name, const char *irbSet ) {
         }
     }
 
-    auto pid = getpid();
-
     int update = 0;
     unsigned char *buf = NULL;
     /* try to find shared memory cache */
@@ -512,7 +503,7 @@ int loadRuleFromCacheOrFile( const char* inst_name, const char *irbSet ) {
         unlockReadMutex(inst_name, &mutex);
         if ( cmp == 0 ) {
 
-                int ret = load_rules(irbSet, irbs, pid, timestamp);
+                int ret = load_rules(irbSet, irbs, timestamp);
                 if ( ret != 0 ) {
                     return ret;
                 }
@@ -528,9 +519,9 @@ int loadRuleFromCacheOrFile( const char* inst_name, const char *irbSet ) {
                 } else {
                     int diffIrbSet = strcmp( cache->ruleBase, irbSet ) != 0;
 
-                    make_copy copy_rule_base_files(irbs, pid);
+                    const auto  cached_rulebases = make_tmp_cache_files(irbs);
                     std::string hash;
-                    int ret = hash_rules(irbs, pid, hash);
+                    int ret = hash_rules(cached_rulebases, hash);
 
                     int diffHash = ret < 0 || hash != cache->hash;
                     if ( diffIrbSet ) {
@@ -566,7 +557,7 @@ int loadRuleFromCacheOrFile( const char* inst_name, const char *irbSet ) {
         clearCoreRuleIndex();
     }
 
-    int ret = load_rules(irbSet, irbs, pid, timestamp);
+    int ret = load_rules(irbSet, irbs, timestamp);
     if ( ret != 0 ) {
         return ret;
     }
@@ -580,28 +571,33 @@ int loadRuleFromCacheOrFile( const char* inst_name, const char *irbSet ) {
 
     return res;
 }
-int readRuleStructAndRuleSetFromFile( const char *ruleBaseName, const char *rulesBaseFile ) {
+int readRuleStructAndRuleSetFromFile( const std::string& ruleBaseName, const boost::iostreams::file_descriptor& fd) {
 
-    int errloc;
-    rError_t errmsgBuf;
-    errmsgBuf.errMsg = NULL;
-    errmsgBuf.len = 0;
+    int errloc{};
+    rError_t errmsgBuf{
+        .errMsg = nullptr,
+        .len = 0
+    };
 
-    char *buf = ( char * ) malloc( ERR_MSG_LEN * 1024 * sizeof( char ) );
-    int res = 0;
-        if ( ( res = readRuleSetFromLocalFile( ruleBaseName, rulesBaseFile, ruleEngineConfig.coreRuleSet, ruleEngineConfig.coreFuncDescIndex, &errloc, &errmsgBuf, ruleEngineConfig.coreRegion ) ) == 0 ) {
-        }
-        else {
-            errMsgToString( &errmsgBuf, buf, ERR_MSG_LEN * 1024 );
-            rodsLog( LOG_ERROR, "%s", buf );
-        }
-    free( buf );
-    freeRErrorContent( &errmsgBuf );
-    return res;
+    if ( const auto res = readRuleSetFromFileDescriptor( ruleBaseName, fd, ruleEngineConfig.coreRuleSet, ruleEngineConfig.coreFuncDescIndex, &errloc, &errmsgBuf, ruleEngineConfig.coreRegion ); res != 0 ) {
+        char *buf = ( char * ) malloc( ERR_MSG_LEN * 1024 * sizeof( char ) );
+        errMsgToString( &errmsgBuf, buf, ERR_MSG_LEN * 1024 );
+        rodsLog( LOG_ERROR, "%s", buf );
+        free( buf );
+        freeRErrorContent( &errmsgBuf );
+        return res;
+    } else {
+        freeRErrorContent( &errmsgBuf );
+        return 0;
+    }
 }
 
 int availableRules() {
-    return ( isComponentInitialized( ruleEngineConfig.appRuleSetStatus ) ? ruleEngineConfig.coreRuleSet->len : 0 ) + ( isComponentInitialized( ruleEngineConfig.appRuleSetStatus ) == INITIALIZED ? ruleEngineConfig.appRuleSet->len : 0 );
+    if (auto init_val = isComponentInitialized( ruleEngineConfig.appRuleSetStatus ); 0 == init_val || INITIALIZED == init_val) {
+        return ruleEngineConfig.appRuleSet->len;
+    } else {
+        return 0;
+    }
 }
 
 

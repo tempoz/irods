@@ -142,7 +142,7 @@ int unlinkFuncDescIndex();
 int clearResources( int resources );
 int clearCoreRuleIndex( );
 int clearAppRuleIndex( );
-int readRuleStructAndRuleSetFromFile( const char *ruleBaseName, const char *rulesFileName );
+int readRuleStructAndRuleSetFromFile( const std::string& ruleBaseName, const boost::iostreams::file_descriptor& rulesFd );
 int loadRuleFromCacheOrFile( const char*, const char *irbSet );
 int createCoreRuleIndex( );
 int createAppRuleIndex( );
