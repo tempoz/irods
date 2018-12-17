@@ -436,9 +436,6 @@ runIrodsAgent( sockaddr_un agent_addr ) {
         cleanupAndExit( status );
     }
 
-    irods::re_plugin_globals.reset(new irods::global_re_plugin_mgr);
-    irods::re_plugin_globals->global_re_mgr.call_start_operations();
-
     status = getRodsEnv( &rsComm.myEnv );
 
     if ( status < 0 ) {
@@ -483,6 +480,9 @@ runIrodsAgent( sockaddr_un agent_addr ) {
             chlDebug( rsComm.myEnv.rodsDebug );
         }
     }
+
+    irods::re_plugin_globals.reset(new irods::global_re_plugin_mgr);
+    irods::re_plugin_globals->global_re_mgr.call_start_operations();
 
     status = initAgent( RULE_ENGINE_TRY_CACHE, &rsComm );
 
